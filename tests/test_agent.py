@@ -27,7 +27,22 @@ def test_base_tools_are_registered_and_called():
 
     called = {p.tool_name for p in _parts(result, ToolCallPart)}
     assert BASE_TOOLS <= called
-    assert len(_parts(result, ToolReturnPart)) == len(_parts(result, ToolCallPart))
+    
+    # 通常のツール実行と、承認待ちのツールを区別する
+    from pydantic_ai import DeferredToolRequests
+
+    assert isinstance(result.output, DeferredToolRequests)
+
+    # 保存ツールだけが承認待ちになっていることを確認
+    pending = result.output.approvals
+    assert {call.tool_name for call in pending} == {"save_learning_log"}
+
+    # 全ツール呼び出しが、実行済みまたは承認待ちであることを確認
+    returned = _parts(result, ToolReturnPart)
+    called = _parts(result, ToolCallPart)
+
+    assert len(returned) + len(pending) == len(called)
+
     assert result.output
 
 
