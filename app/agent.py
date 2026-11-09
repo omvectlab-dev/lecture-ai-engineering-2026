@@ -16,7 +16,7 @@ import inspect
 import json
 from pathlib import Path
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults
 from pydantic_ai.exceptions import ModelHTTPError
 from fastmcp import Client
 from pydantic_ai.mcp import MCPToolset, StdioTransport
@@ -35,12 +35,27 @@ INSTRUCTIONS = """\
 - 用語集に見つからないことは、推測で断定せず「用語集にはない」と伝える。
 - 回答の最後に、関係する回（第N回）を示す。
 - 宿題の答えそのものは書かず、考え方のヒントで導く。
+- 学習内容の保存を求められたら save_learning_log を使う。
 """
 
 # モデルは実行時に渡す（テストではAPIを呼ばない TestModel に差し替えるため）
-agent = Agent(instructions=INSTRUCTIONS)
+
+# モデルは実行時に渡す
+agent = Agent(
+    instructions=INSTRUCTIONS,
+    output_type=[str, DeferredToolRequests],
+)
+
+# 通常のツール
 agent.tool_plain(tools.search_glossary)
 agent.tool_plain(tools.get_lecture_summary)
+agent.tool_plain(tools.make_quiz)
+
+# 承認が必要な保存ツール
+agent.tool_plain(
+    tools.save_learning_log,
+    requires_approval=True,
+)
 
 # TODO(第3回 演習): tools.py に make_quiz を作り、ここで登録しよう
 
@@ -129,12 +144,66 @@ def main() -> None:
         print("[tools] MCP サーバー（app/mcp_servers.json）")
     try:
         result = target.run_sync(args.question, model=build_model())
+
+        # 承認待ちのツールがある場合、利用者に確認する
+        approval_rounds = 0
+        while isinstance(result.output, DeferredToolRequests):
+            approval_rounds += 1
+
+            # 承認確認が繰り返される場合は安全のため停止
+            if approval_rounds > 3:
+                print("承認待ちが繰り返されたため終了します。")
+                return
+
+            requests = result.output
+
+            # 今回は外部実行型のツールには対応しない
+            if requests.calls:
+                print("外部実行型のツールには未対応です。")
+                return
+
+            results = DeferredToolResults()
+
+            for call in requests.approvals:
+                # 実行予定のツールと引数を表示する
+                print(f"\n[承認確認] {call.tool_name}")
+                print(
+                    json.dumps(
+                        call.args_as_dict(),
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+
+                # yを入力した場合のみ承認する
+                choice = input(
+                    "この操作を承認しますか？ [y/N]: "
+                ).strip().lower()
+
+                approved = choice in ("y", "yes")
+                results.approvals[call.tool_call_id] = approved
+
+                if approved:
+                    print("承認しました。")
+                else:
+                    print("拒否しました。")
+
+            # 承認・拒否の結果を渡して処理を再開
+            result = target.run_sync(
+                message_history=result.all_messages(),
+                deferred_tool_results=results,
+                model=build_model(),
+            )
+
     except ModelHTTPError as e:
         print(api_error_message(e.status_code, str(e.body)[:200]))
         raise SystemExit(1)
+
     print(result.output)
+
     if args.trace:
         print_trace(result)
+
 
 
 if __name__ == "__main__":
