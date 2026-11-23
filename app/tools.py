@@ -137,9 +137,17 @@ def make_quiz(lecture: int) -> str:
     「第2回の確認問題を出して」のように、
     特定の講義回について復習問題を求められたときに使う。
     """
-    entries = [e for e in load_glossary() if e["lecture"] == lecture]
+    glossary = load_glossary()
+    entries = [e for e in glossary if e["lecture"] == lecture]
     if not entries:
-        return f"第{lecture}回の用語が見つかりませんでした。"
+        valid = sorted({e["lecture"] for e in glossary})
+        if not valid:
+            return "用語集が空のため、確認問題を作成できません。"
+        choices = "、".join(f"第{n}回" for n in valid)
+        return (
+            f"第{lecture}回の用語は登録されていません。"
+            f"{choices}から指定してください。"
+        )
 
     entry = random.choice(entries)
     return json.dumps(
