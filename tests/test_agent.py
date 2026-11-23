@@ -5,19 +5,23 @@ TestModel は実際のLLMを呼ばない偽モデルで、登録されたツー�
 「ツールが登録され、呼ばれ、結果がモデルに戻るか」を確かめられる。
 """
 
+import json
+
+from pydantic_ai import DeferredToolRequests
 from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 from pydantic_ai.models.test import TestModel
 
 from app.agent import agent
 
-BASE_TOOLS = {"search_glossary", "get_lecture_summary"}
+BASE_TOOLS = {"search_materials", "search_glossary", "get_lecture_summary"}
 
 
 def _parts(result, kind):
     return [p for m in result.all_messages() for p in m.parts if isinstance(p, kind)]
 
 
-def test_base_tools_are_registered_and_called():
+def test_base_tools_are_registered_and_called(monkeypatch):
+    monkeypatch.setattr("app.retrieval.search", lambda *args, **kwargs: [])
     model = TestModel()
     with agent.override(model=model):
         result = agent.run_sync("LoRAとは？")
@@ -27,23 +31,21 @@ def test_base_tools_are_registered_and_called():
 
     called = {p.tool_name for p in _parts(result, ToolCallPart)}
     assert BASE_TOOLS <= called
-    
-    # 通常のツール実行と、承認待ちのツールを区別する
-    from pydantic_ai import DeferredToolRequests
-
-    assert isinstance(result.output, DeferredToolRequests)
-
-    # 保存ツールだけが承認待ちになっていることを確認
-    pending = result.output.approvals
-    assert {call.tool_name for call in pending} == {"save_learning_log"}
-
-    # 全ツール呼び出しが、実行済みまたは承認待ちであることを確認
-    returned = _parts(result, ToolReturnPart)
-    called = _parts(result, ToolCallPart)
-
-    assert len(returned) + len(pending) == len(called)
-
+    # 承認が必要なツール（requires_approval=True）は、実行されずに承認待ちになるので戻り値が無い
+    waiting = len(result.output.approvals) if isinstance(result.output, DeferredToolRequests) else 0
+    assert len(_parts(result, ToolReturnPart)) + waiting == len(_parts(result, ToolCallPart))
     assert result.output
+
+
+def test_material_result_reaches_the_model(monkeypatch):
+    hit = {"page_id": "lec02-main-p052", "lecture": 2, "page": 52, "content": "元の重みは固定"}
+    monkeypatch.setattr("app.retrieval.search", lambda *args, **kwargs: [hit])
+    model = TestModel(call_tools=["search_materials"])
+    with agent.override(model=model):
+        result = agent.run_sync("RAGとは？")
+    returns = _parts(result, ToolReturnPart)
+    assert returns and returns[0].tool_name == "search_materials"
+    assert json.loads(returns[0].content)["results"] == [hit]
 
 
 def test_glossary_result_reaches_the_model():
@@ -52,3 +54,14 @@ def test_glossary_result_reaches_the_model():
         result = agent.run_sync("RAGとは？")
     returns = _parts(result, ToolReturnPart)
     assert returns and returns[0].tool_name == "search_glossary"
+
+
+def test_legacy_approval_is_requested_without_writing():
+    """保存ツールが登録され、利用者承認を待つことを確認する。"""
+    model = TestModel(call_tools=["save_learning_log"])
+    with agent.override(model=model):
+        result = agent.run_sync("学習内容を保存して")
+    offered = {t.name for t in model.last_model_request_parameters.function_tools}
+    assert {"make_quiz", "save_learning_log"} <= offered
+    assert isinstance(result.output, DeferredToolRequests)
+    assert {c.tool_name for c in result.output.approvals} == {"save_learning_log"}
